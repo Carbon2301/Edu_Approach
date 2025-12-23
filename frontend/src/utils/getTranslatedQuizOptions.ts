@@ -1,0 +1,1 @@
+export const getOceanOptions = (language: 'ja' | 'vi') => {  if (language === 'ja') {    return [      '全く当てはまらない',      '当てはまらない',      'どちらでもない',      '当てはまる',      '非常に当てはまる',    ];  }  return [    'Hoàn toàn không đồng ý',    'Không đồng ý',    'Trung lập',    'Đồng ý',    'Hoàn toàn đồng ý',  ];};
