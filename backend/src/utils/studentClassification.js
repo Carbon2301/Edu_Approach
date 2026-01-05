@@ -1,2 +1,66 @@
-export const classifyStudent = (oceanScores, logicalResult) => {  if (!oceanScores) return null;  const N = oceanScores.neuroticism || 0;  const E = oceanScores.extraversion || 0;  const O = oceanScores.openness || 0;  const C = oceanScores.conscientiousness || 0;  let L = 0;  if (logicalResult) {    if (logicalResult.percentage !== undefined) {      L = logicalResult.percentage;    } else if (logicalResult.correctCount !== undefined && logicalResult.totalQuestions !== undefined) {      L = Math.round((logicalResult.correctCount / logicalResult.totalQuestions) * 100);    }  }  const classifications = [];  if (C >= 70 && N <= 40) {    classifications.push({      id: 1,      name: { ja: '自主性', vi: 'Tự Chủ' },      score: C,      trait: 'conscientiousness'    });  }  if (N >= 65) {    classifications.push({      id: 2,      name: { ja: 'プレッシャー耐性', vi: 'Dễ Áp Lực' },      score: N,      trait: 'neuroticism'    });  }  if (O >= 70) {    classifications.push({      id: 3,      name: { ja: '創造性', vi: 'Sáng Tạo' },      score: O,      trait: 'openness'    });  }  if (E >= 65) {    classifications.push({      id: 4,      name: { ja: '外向性', vi: 'Hướng Ngoại' },      score: E,      trait: 'extraversion'    });  }  if (E <= 40 && L > 60 && O >= 50) {    classifications.push({      id: 5,      name: { ja: '内向的分析', vi: 'Hướng Nội Phân Tích' },      score: O, 
-      trait: 'openness'    });  }  if (classifications.length === 0) return null;  const highest = classifications.reduce((a, b) => a.score > b.score ? a : b);  return highest;};
+export const classifyStudent = (oceanScores, logicalResult) => {
+  if (!oceanScores) return null;
+  const N = oceanScores.neuroticism || 0;
+  const E = oceanScores.extraversion || 0;
+  const O = oceanScores.openness || 0;
+  const C = oceanScores.conscientiousness || 0;
+  let L = 0;
+  if (logicalResult) {
+    if (logicalResult.percentage !== undefined) {
+      L = logicalResult.percentage;
+    } else if (logicalResult.correctCount !== undefined && logicalResult.totalQuestions !== undefined) {
+      L = Math.round((logicalResult.correctCount / logicalResult.totalQuestions) * 100);
+    }
+  }
+  const classifications = [];
+  if (C >= 70 && N <= 40) {
+    classifications.push({
+      id: 1,
+      name: { ja: '自主性', vi: 'Tự Chủ' },
+      score: C,
+      trait: 'conscientiousness'
+    });
+  }
+  if (N >= 65) {
+    classifications.push({
+      id: 2,
+      name: { ja: 'プレッシャー耐性', vi: 'Dễ Áp Lực' },
+      score: N,
+      trait: 'neuroticism'
+    });
+  }
+  if (O >= 70) {
+    classifications.push({
+      id: 3,
+      name: { ja: '創造性', vi: 'Sáng Tạo' },
+      score: O,
+      trait: 'openness'
+    });
+  }
+  if (E >= 65) {
+    classifications.push({
+      id: 4,
+      name: { ja: '外向性', vi: 'Hướng Ngoại' },
+      score: E,
+      trait: 'extraversion'
+    });
+  }
+  if (E <= 40 && L > 60 && O >= 50) {
+    classifications.push({
+      id: 5,
+      name: { ja: '内向的分析', vi: 'Hướng Nội Phân Tích' },
+      score: O, 
+      trait: 'openness'
+    });
+  }
+  if (classifications.length === 0) {
+    return {
+      id: 6,
+      name: { ja: 'その他', vi: 'Khác' },
+      score: 0,
+      trait: 'other'
+    };
+  }
+  const highest = classifications.reduce((a, b) => a.score > b.score ? a : b);
+  return highest;
+};

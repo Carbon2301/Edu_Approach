@@ -1,8 +1,755 @@
-import Class from '../models/Class.model.js';import User from '../models/User.model.js';import QuizResult from '../models/QuizResult.model.js';import AIRecommendation from '../models/AIRecommendation.model.js';import Quiz from '../models/Quiz.model.js';import { validationResult } from 'express-validator';export const getClasses = async (req, res) => {  try {    const { search, page = 1, limit = 12 } = req.query;    let query = { teacher: req.user._id };    if (search) {      query.name = { $regex: search, $options: 'i' };    }    const pageNum = parseInt(page, 10);    const limitNum = parseInt(limit, 10);    const skip = (pageNum - 1) * limitNum;    const total = await Class.countDocuments(query);    const classes = await Class.find(query)      .populate('students', 'name email studentId profileImage')      .sort({ createdAt: 1 })      .skip(skip)      .limit(limitNum);    res.json({      success: true,      data: {        classes,        pagination: {          currentPage: pageNum,          totalPages: Math.ceil(total / limitNum),          totalItems: total,          itemsPerPage: limitNum,        },      },    });  } catch (error) {    console.error('Get classes error:', error);    res.status(500).json({      success: false,      message: 'Server error while fetching classes',      error: error.message,    });  }};export const getClassById = async (req, res) => {  try {    const classData = await Class.findById(req.params.id)      .populate('students', 'name email studentId profileImage phone location gender')      .populate('teacher', 'name email profileImage');    if (!classData) {      return res.status(404).json({        success: false,        message: 'Class not found',      });    }    if (classData.teacher._id.toString() !== req.user._id.toString()) {      return res.status(403).json({        success: false,        message: 'Not authorized to access this class',      });    }    const { classifyStudent } = await import('../utils/studentClassification.js');    const studentIds = classData.students.map(s => s._id);    const quizResults = await QuizResult.find({      userId: { $in: studentIds },    })      .populate('quizId', 'name type')      .sort({ completedAt: -1 });    const studentLatestResults = {};    const studentIdStrings = studentIds.map(id => id.toString());    studentIdStrings.forEach(userId => {      studentLatestResults[userId] = {        ocean: null,        logical: null,      };    });    quizResults.forEach(result => {      try {        if (!result || !result.userId) return;        const userId = result.userId.toString();        if (!studentLatestResults[userId]) return;        if (result.quizId && typeof result.quizId === 'object' && result.quizId.type === 'ocean' &&             result.scores && Object.keys(result.scores).length > 0) {          const resultDate = result.completedAt ? new Date(result.completedAt) : new Date(0);          const currentDate = studentLatestResults[userId].ocean?.completedAt             ? new Date(studentLatestResults[userId].ocean.completedAt)             : new Date(0);          if (!studentLatestResults[userId].ocean || resultDate > currentDate) {            studentLatestResults[userId].ocean = result;          }        }        if (result.quizId && typeof result.quizId === 'object' && result.quizId.type === 'logical' &&             result.correctCount !== undefined) {          const resultDate = result.completedAt ? new Date(result.completedAt) : new Date(0);          const currentDate = studentLatestResults[userId].logical?.completedAt             ? new Date(studentLatestResults[userId].logical.completedAt)             : new Date(0);          if (!studentLatestResults[userId].logical || resultDate > currentDate) {            studentLatestResults[userId].logical = result;          }        }      } catch (error) {        console.error('Error processing quiz result:', error, result);      }    });    const studentsWithClassification = classData.students.map(student => {      const studentObj = student.toObject ? student.toObject() : student;      const userId = studentObj._id.toString();      const { ocean, logical } = studentLatestResults[userId] || { ocean: null, logical: null };      let classification = null;      if (ocean && ocean.scores) {        classification = classifyStudent(ocean.scores, logical);      }      return {        ...studentObj,        classification: classification ? {          id: classification.id,          name: classification.name,          score: classification.score,          trait: classification.trait,        } : null,      };    });    const classDataObj = classData.toObject();    classDataObj.students = studentsWithClassification;    res.json({      success: true,      data: {        class: classDataObj,      },    });  } catch (error) {    console.error('Get class error:', error);    res.status(500).json({      success: false,      message: 'Server error while fetching class',      error: error.message,    });  }};export const createClass = async (req, res) => {  try {    const errors = validationResult(req);    if (!errors.isEmpty()) {      return res.status(400).json({        success: false,        errors: errors.array(),      });    }    const { name, description, teacherName, institution, studentEmails, studentIds } = req.body;    const studentIds_found = [];    if (studentEmails && studentEmails.length > 0) {      const studentsByEmail = await User.find({        email: { $in: studentEmails },        role: 'student',      });      studentIds_found.push(...studentsByEmail.map(s => s._id));    }    if (studentIds && studentIds.length > 0) {      const studentsById = await User.find({        studentId: { $in: studentIds },        role: 'student',      });      studentIds_found.push(...studentsById.map(s => s._id));    }    const uniqueStudentIds = [...new Set(studentIds_found.map(id => id.toString()))];    const classData = await Class.create({      name,      description,      teacher: req.user._id,      teacherName: teacherName || req.user.name,      institution,      students: uniqueStudentIds,    });    const populatedClass = await Class.findById(classData._id)      .populate('students', 'name email studentId profileImage');    res.status(201).json({      success: true,      message: 'Class created successfully',      data: {        class: populatedClass,      },    });  } catch (error) {    console.error('Create class error:', error);    res.status(500).json({      success: false,      message: 'Server error while creating class',      error: error.message,    });  }};export const updateClass = async (req, res) => {  try {    const errors = validationResult(req);    if (!errors.isEmpty()) {      return res.status(400).json({        success: false,        errors: errors.array(),      });    }    const classData = await Class.findById(req.params.id);    if (!classData) {      return res.status(404).json({        success: false,        message: 'Class not found',      });    }    if (classData.teacher.toString() !== req.user._id.toString()) {      return res.status(403).json({        success: false,        message: 'Not authorized to update this class',      });    }    const { name, description, teacherName, institution, studentEmails, studentIds } = req.body;    let addedCount = 0;    let notFoundEmails = [];    let notFoundIds = [];    let duplicateCount = 0;    if (studentEmails || studentIds) {      const studentIds_found = [];      const foundEmails = [];      const foundStudentIds = [];      if (studentEmails && studentEmails.length > 0) {        const studentsByEmail = await User.find({          email: { $in: studentEmails },          role: 'student',        });        const foundEmailList = studentsByEmail.map(s => s.email);        notFoundEmails = studentEmails.filter(email => !foundEmailList.includes(email));        studentIds_found.push(...studentsByEmail.map(s => s._id));        foundEmails.push(...foundEmailList);      }      if (studentIds && studentIds.length > 0) {        const studentsById = await User.find({          studentId: { $in: studentIds },          role: 'student',        });        const foundIdList = studentsById.map(s => s.studentId);        notFoundIds = studentIds.filter(id => !foundIdList.includes(id));        studentIds_found.push(...studentsById.map(s => s._id));        foundStudentIds.push(...foundIdList);      }      const existingStudentIds = classData.students.map(id => id.toString());      const newStudentIds = studentIds_found        .filter(id => !existingStudentIds.includes(id.toString()))        .map(id => id.toString());      duplicateCount = studentIds_found.length - newStudentIds.length;      addedCount = newStudentIds.length;      classData.students = [...classData.students, ...newStudentIds];    }    if (name) classData.name = name;    if (description !== undefined) classData.description = description;    if (teacherName) classData.teacherName = teacherName;    if (institution !== undefined) classData.institution = institution;    await classData.save();    const populatedClass = await Class.findById(classData._id)      .populate('students', 'name email studentId profileImage phone location');    let message = 'Class updated successfully';    const details = [];    if (studentEmails || studentIds) {      if (addedCount > 0) {        details.push(`${addedCount} student(s) added`);      }      if (duplicateCount > 0) {        details.push(`${duplicateCount} student(s) already in class`);      }      if (notFoundEmails.length > 0 || notFoundIds.length > 0) {        const notFoundCount = notFoundEmails.length + notFoundIds.length;        details.push(`${notFoundCount} student(s) not found`);      }      if (details.length > 0) {        message += `. ${details.join(', ')}.`;      }    }    res.json({      success: true,      message,      data: {        class: populatedClass,        addedCount,        duplicateCount,        notFoundEmails,        notFoundIds,      },    });  } catch (error) {    console.error('Update class error:', error);    res.status(500).json({      success: false,      message: 'Server error while updating class',      error: error.message,    });  }};export const deleteClass = async (req, res) => {  try {    const classData = await Class.findById(req.params.id);    if (!classData) {      return res.status(404).json({        success: false,        message: 'Class not found',      });    }    if (classData.teacher.toString() !== req.user._id.toString()) {      return res.status(403).json({        success: false,        message: 'Not authorized to delete this class',      });    }    await Class.findByIdAndDelete(req.params.id);    res.json({      success: true,      message: 'Class deleted successfully',    });  } catch (error) {    console.error('Delete class error:', error);    res.status(500).json({      success: false,      message: 'Server error while deleting class',      error: error.message,    });  }};export const addStudentsToClass = async (req, res) => {  try {    const { studentEmails, studentIds } = req.body;    const classData = await Class.findById(req.params.id);    if (!classData) {      return res.status(404).json({        success: false,        message: 'Class not found',      });    }    if (classData.teacher.toString() !== req.user._id.toString()) {      return res.status(403).json({        success: false,        message: 'Not authorized to modify this class',      });    }    const studentIds_found = [];    if (studentEmails && studentEmails.length > 0) {      const studentsByEmail = await User.find({        email: { $in: studentEmails },        role: 'student',      });      studentIds_found.push(...studentsByEmail.map(s => s._id));    }    if (studentIds && studentIds.length > 0) {      const studentsById = await User.find({        studentId: { $in: studentIds },        role: 'student',      });      studentIds_found.push(...studentsById.map(s => s._id));    }    const existingStudentIds = classData.students.map(id => id.toString());    const newStudentIds = studentIds_found      .filter(id => !existingStudentIds.includes(id.toString()))      .map(id => id.toString());    classData.students = [...classData.students, ...newStudentIds];    await classData.save();    const populatedClass = await Class.findById(classData._id)      .populate('students', 'name email studentId profileImage phone location');    res.json({      success: true,      message: 'Students added successfully',      data: {        class: populatedClass,      },    });  } catch (error) {    console.error('Add students error:', error);    res.status(500).json({      success: false,      message: 'Server error while adding students',      error: error.message,    });  }};export const removeStudentFromClass = async (req, res) => {  try {    const classData = await Class.findById(req.params.id);    if (!classData) {      return res.status(404).json({        success: false,        message: 'Class not found',      });    }    if (classData.teacher.toString() !== req.user._id.toString()) {      return res.status(403).json({        success: false,        message: 'Not authorized to modify this class',      });    }    classData.students = classData.students.filter(      studentId => studentId.toString() !== req.params.studentId    );    await classData.save();    const populatedClass = await Class.findById(classData._id)      .populate('students', 'name email studentId profileImage phone location');    res.json({      success: true,      message: 'Student removed successfully',      data: {        class: populatedClass,      },    });  } catch (error) {    console.error('Remove student error:', error);    res.status(500).json({      success: false,      message: 'Server error while removing student',      error: error.message,    });  }};export const removeStudentsFromClass = async (req, res) => {  try {    const { studentEmails, studentIds } = req.body;    if ((!studentEmails || studentEmails.length === 0) && (!studentIds || studentIds.length === 0)) {      return res.status(400).json({        success: false,        message: 'Please provide at least one email or student ID',      });    }    const classData = await Class.findById(req.params.id);    if (!classData) {      return res.status(404).json({        success: false,        message: 'Class not found',      });    }    if (classData.teacher.toString() !== req.user._id.toString()) {      return res.status(403).json({        success: false,        message: 'Not authorized to modify this class',      });    }    const studentIdsToRemove = [];    const notFoundEmails = [];    const notFoundIds = [];    if (studentEmails && studentEmails.length > 0) {      const studentsByEmail = await User.find({        email: { $in: studentEmails },        role: 'student',      });      const foundEmails = studentsByEmail.map(s => s.email);      const notFound = studentEmails.filter(email => !foundEmails.includes(email));      notFoundEmails.push(...notFound);      studentIdsToRemove.push(...studentsByEmail.map(s => s._id.toString()));    }    if (studentIds && studentIds.length > 0) {      const studentsById = await User.find({        studentId: { $in: studentIds },        role: 'student',      });      const foundIds = studentsById.map(s => s.studentId);      const notFound = studentIds.filter(id => !foundIds.includes(id));      notFoundIds.push(...notFound);      studentIdsToRemove.push(...studentsById.map(s => s._id.toString()));    }    const existingStudentIds = classData.students.map(id => id.toString());    const studentsToRemove = studentIdsToRemove.filter(id => existingStudentIds.includes(id));    classData.students = classData.students.filter(      studentId => !studentsToRemove.includes(studentId.toString())    );    await classData.save();    const populatedClass = await Class.findById(classData._id)      .populate('students', 'name email studentId profileImage phone location');    let message = `Removed ${studentsToRemove.length} student(s) successfully`;    if (notFoundEmails.length > 0 || notFoundIds.length > 0) {      const notFoundList = [        ...(notFoundEmails.length > 0 ? [`Emails: ${notFoundEmails.join(', ')}`] : []),        ...(notFoundIds.length > 0 ? [`Student IDs: ${notFoundIds.join(', ')}`] : [])      ];      message += `. Not found: ${notFoundList.join('; ')}`;    }    res.json({      success: true,      message,      data: {        class: populatedClass,        removedCount: studentsToRemove.length,        notFoundEmails,        notFoundIds,      },    });  } catch (error) {    console.error('Remove students error:', error);    res.status(500).json({      success: false,      message: 'Server error while removing students',      error: error.message,    });  }};export const getClassAnalysis = async (req, res) => {  try {    const classData = await Class.findById(req.params.id)      .populate('students', 'name email studentId');    if (!classData) {      return res.status(404).json({        success: false,        message: 'Class not found',      });    }    if (classData.teacher.toString() !== req.user._id.toString()) {      return res.status(403).json({        success: false,        message: 'Not authorized to access this class',      });    }    const studentIds = classData.students.map(s => s._id);    const quizResults = await QuizResult.find({      userId: { $in: studentIds },    })      .populate('quizId', 'name type')      .sort({ completedAt: -1 });    const totalQuizzes = await QuizResult.distinct('quizId', {      userId: { $in: studentIds },    });    const { classifyStudent } = await import('../utils/studentClassification.js');    const studentLatestResults = {};    const studentIdStrings = studentIds.map(id => id.toString());    studentIdStrings.forEach(userId => {      studentLatestResults[userId] = {        ocean: null,        logical: null,      };    });    quizResults.forEach(result => {      try {        if (!result || !result.userId) return;        const userId = result.userId.toString();        if (!studentLatestResults[userId]) {          return;        }        if (result.quizId && typeof result.quizId === 'object' && result.quizId.type === 'ocean' &&             result.scores && Object.keys(result.scores).length > 0) {          const resultDate = result.completedAt ? new Date(result.completedAt) : new Date(0);          const currentDate = studentLatestResults[userId].ocean?.completedAt             ? new Date(studentLatestResults[userId].ocean.completedAt)             : new Date(0);          if (!studentLatestResults[userId].ocean || resultDate > currentDate) {            studentLatestResults[userId].ocean = result;          }        }        if (result.quizId && typeof result.quizId === 'object' && result.quizId.type === 'logical' &&             result.correctCount !== undefined) {          const resultDate = result.completedAt ? new Date(result.completedAt) : new Date(0);          const currentDate = studentLatestResults[userId].logical?.completedAt             ? new Date(studentLatestResults[userId].logical.completedAt)             : new Date(0);          if (!studentLatestResults[userId].logical || resultDate > currentDate) {            studentLatestResults[userId].logical = result;          }        }      } catch (error) {        console.error('Error processing quiz result:', error, result);      }    });    const oceanAverages = {      neuroticism: 0,      extraversion: 0,      openness: 0,      agreeableness: 0,      conscientiousness: 0,    };    let studentsWithOcean = 0;    Object.values(studentLatestResults).forEach(({ ocean }) => {      if (ocean && ocean.scores) {        oceanAverages.neuroticism += ocean.scores.neuroticism || 0;        oceanAverages.extraversion += ocean.scores.extraversion || 0;        oceanAverages.openness += ocean.scores.openness || 0;        oceanAverages.agreeableness += ocean.scores.agreeableness || 0;        oceanAverages.conscientiousness += ocean.scores.conscientiousness || 0;        studentsWithOcean++;      }    });    if (studentsWithOcean > 0) {      Object.keys(oceanAverages).forEach(key => {        oceanAverages[key] = Math.round(oceanAverages[key] / studentsWithOcean);      });    }    let studentsWithLogical = 0;    let logicalSum = 0;    Object.values(studentLatestResults).forEach(({ logical }) => {      if (logical) {        const percentage = logical.percentage ||           (logical.correctCount !== undefined && logical.totalQuestions !== undefined            ? Math.round((logical.correctCount / logical.totalQuestions) * 100)            : 0);        if (percentage > 0) {          logicalSum += percentage;          studentsWithLogical++;        }      }    });    const logicalAverage = studentsWithLogical > 0       ? Math.round((logicalSum / studentsWithLogical) * 100) / 100      : 0;    const classificationCounts = {      1: 0, 
+import Class from '../models/Class.model.js';
+import User from '../models/User.model.js';
+import QuizResult from '../models/QuizResult.model.js';
+import AIRecommendation from '../models/AIRecommendation.model.js';
+import Quiz from '../models/Quiz.model.js';
+import { validationResult } from 'express-validator';
+export const getClasses = async (req, res) => {
+  try {
+    const { search, page = 1, limit = 12 } = req.query;
+    let query = { teacher: req.user._id };
+    if (search) {
+      query.name = { $regex: search, $options: 'i' };
+    }
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+    const total = await Class.countDocuments(query);
+    const classes = await Class.find(query)
+      .populate('students', 'name email studentId profileImage')
+      .sort({ createdAt: 1 })
+      .skip(skip)
+      .limit(limitNum);
+    res.json({
+      success: true,
+      data: {
+        classes,
+        pagination: {
+          currentPage: pageNum,
+          totalPages: Math.ceil(total / limitNum),
+          totalItems: total,
+          itemsPerPage: limitNum,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Get classes error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching classes',
+      error: error.message,
+    });
+  }
+};
+export const getClassById = async (req, res) => {
+  try {
+    const classData = await Class.findById(req.params.id)
+      .populate('students', 'name email studentId profileImage phone location gender')
+      .populate('teacher', 'name email profileImage');
+    if (!classData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found',
+      });
+    }
+    if (classData.teacher._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to access this class',
+      });
+    }
+    const { classifyStudent } = await import('../utils/studentClassification.js');
+    const studentIds = classData.students.map(s => s._id);
+    const quizResults = await QuizResult.find({
+      userId: { $in: studentIds },
+    })
+      .populate('quizId', 'name type')
+      .sort({ completedAt: -1 });
+    const studentLatestResults = {};
+    const studentIdStrings = studentIds.map(id => id.toString());
+    studentIdStrings.forEach(userId => {
+      studentLatestResults[userId] = {
+        ocean: null,
+        logical: null,
+      };
+    });
+    quizResults.forEach(result => {
+      try {
+        if (!result || !result.userId) return;
+        const userId = result.userId.toString();
+        if (!studentLatestResults[userId]) return;
+        if (result.quizId && typeof result.quizId === 'object' && result.quizId.type === 'ocean' && 
+            result.scores && Object.keys(result.scores).length > 0) {
+          const resultDate = result.completedAt ? new Date(result.completedAt) : new Date(0);
+          const currentDate = studentLatestResults[userId].ocean?.completedAt 
+            ? new Date(studentLatestResults[userId].ocean.completedAt) 
+            : new Date(0);
+          if (!studentLatestResults[userId].ocean || resultDate > currentDate) {
+            studentLatestResults[userId].ocean = result;
+          }
+        }
+        if (result.quizId && typeof result.quizId === 'object' && result.quizId.type === 'logical' && 
+            result.correctCount !== undefined) {
+          const resultDate = result.completedAt ? new Date(result.completedAt) : new Date(0);
+          const currentDate = studentLatestResults[userId].logical?.completedAt 
+            ? new Date(studentLatestResults[userId].logical.completedAt) 
+            : new Date(0);
+          if (!studentLatestResults[userId].logical || resultDate > currentDate) {
+            studentLatestResults[userId].logical = result;
+          }
+        }
+      } catch (error) {
+        console.error('Error processing quiz result:', error, result);
+      }
+    });
+    const studentsWithClassification = classData.students.map(student => {
+      const studentObj = student.toObject ? student.toObject() : student;
+      const userId = studentObj._id.toString();
+      const { ocean, logical } = studentLatestResults[userId] || { ocean: null, logical: null };
+      let classification = null;
+      if (ocean && ocean.scores) {
+        classification = classifyStudent(ocean.scores, logical);
+      }
+      return {
+        ...studentObj,
+        classification: classification ? {
+          id: classification.id,
+          name: classification.name,
+          score: classification.score,
+          trait: classification.trait,
+        } : null,
+      };
+    });
+    const classDataObj = classData.toObject();
+    classDataObj.students = studentsWithClassification;
+    res.json({
+      success: true,
+      data: {
+        class: classDataObj,
+      },
+    });
+  } catch (error) {
+    console.error('Get class error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching class',
+      error: error.message,
+    });
+  }
+};
+export const createClass = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        errors: errors.array(),
+      });
+    }
+    const { name, description, teacherName, institution, studentEmails, studentIds } = req.body;
+    const studentIds_found = [];
+    if (studentEmails && studentEmails.length > 0) {
+      const studentsByEmail = await User.find({
+        email: { $in: studentEmails },
+        role: 'student',
+      });
+      studentIds_found.push(...studentsByEmail.map(s => s._id));
+    }
+    if (studentIds && studentIds.length > 0) {
+      const studentsById = await User.find({
+        studentId: { $in: studentIds },
+        role: 'student',
+      });
+      studentIds_found.push(...studentsById.map(s => s._id));
+    }
+    const uniqueStudentIds = [...new Set(studentIds_found.map(id => id.toString()))];
+    const classData = await Class.create({
+      name,
+      description,
+      teacher: req.user._id,
+      teacherName: teacherName || req.user.name,
+      institution,
+      students: uniqueStudentIds,
+    });
+    const populatedClass = await Class.findById(classData._id)
+      .populate('students', 'name email studentId profileImage');
+    res.status(201).json({
+      success: true,
+      message: 'Class created successfully',
+      data: {
+        class: populatedClass,
+      },
+    });
+  } catch (error) {
+    console.error('Create class error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while creating class',
+      error: error.message,
+    });
+  }
+};
+export const updateClass = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        errors: errors.array(),
+      });
+    }
+    const classData = await Class.findById(req.params.id);
+    if (!classData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found',
+      });
+    }
+    if (classData.teacher.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this class',
+      });
+    }
+    const { name, description, teacherName, institution, studentEmails, studentIds } = req.body;
+    let addedCount = 0;
+    let notFoundEmails = [];
+    let notFoundIds = [];
+    let duplicateCount = 0;
+    if (studentEmails || studentIds) {
+      const studentIds_found = [];
+      const foundEmails = [];
+      const foundStudentIds = [];
+      if (studentEmails && studentEmails.length > 0) {
+        const studentsByEmail = await User.find({
+          email: { $in: studentEmails },
+          role: 'student',
+        });
+        const foundEmailList = studentsByEmail.map(s => s.email);
+        notFoundEmails = studentEmails.filter(email => !foundEmailList.includes(email));
+        studentIds_found.push(...studentsByEmail.map(s => s._id));
+        foundEmails.push(...foundEmailList);
+      }
+      if (studentIds && studentIds.length > 0) {
+        const studentsById = await User.find({
+          studentId: { $in: studentIds },
+          role: 'student',
+        });
+        const foundIdList = studentsById.map(s => s.studentId);
+        notFoundIds = studentIds.filter(id => !foundIdList.includes(id));
+        studentIds_found.push(...studentsById.map(s => s._id));
+        foundStudentIds.push(...foundIdList);
+      }
+      const existingStudentIds = classData.students.map(id => id.toString());
+      const newStudentIds = studentIds_found
+        .filter(id => !existingStudentIds.includes(id.toString()))
+        .map(id => id.toString());
+      duplicateCount = studentIds_found.length - newStudentIds.length;
+      addedCount = newStudentIds.length;
+      classData.students = [...classData.students, ...newStudentIds];
+    }
+    if (name) classData.name = name;
+    if (description !== undefined) classData.description = description;
+    if (teacherName) classData.teacherName = teacherName;
+    if (institution !== undefined) classData.institution = institution;
+    await classData.save();
+    const populatedClass = await Class.findById(classData._id)
+      .populate('students', 'name email studentId profileImage phone location');
+    let message = 'Class updated successfully';
+    const details = [];
+    if (studentEmails || studentIds) {
+      if (addedCount > 0) {
+        details.push(`${addedCount} student(s) added`);
+      }
+      if (duplicateCount > 0) {
+        details.push(`${duplicateCount} student(s) already in class`);
+      }
+      if (notFoundEmails.length > 0 || notFoundIds.length > 0) {
+        const notFoundCount = notFoundEmails.length + notFoundIds.length;
+        details.push(`${notFoundCount} student(s) not found`);
+      }
+      if (details.length > 0) {
+        message += `. ${details.join(', ')}.`;
+      }
+    }
+    res.json({
+      success: true,
+      message,
+      data: {
+        class: populatedClass,
+        addedCount,
+        duplicateCount,
+        notFoundEmails,
+        notFoundIds,
+      },
+    });
+  } catch (error) {
+    console.error('Update class error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while updating class',
+      error: error.message,
+    });
+  }
+};
+export const deleteClass = async (req, res) => {
+  try {
+    const classData = await Class.findById(req.params.id);
+    if (!classData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found',
+      });
+    }
+    if (classData.teacher.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to delete this class',
+      });
+    }
+    await Class.findByIdAndDelete(req.params.id);
+    res.json({
+      success: true,
+      message: 'Class deleted successfully',
+    });
+  } catch (error) {
+    console.error('Delete class error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while deleting class',
+      error: error.message,
+    });
+  }
+};
+export const addStudentsToClass = async (req, res) => {
+  try {
+    const { studentEmails, studentIds } = req.body;
+    const classData = await Class.findById(req.params.id);
+    if (!classData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found',
+      });
+    }
+    if (classData.teacher.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to modify this class',
+      });
+    }
+    const studentIds_found = [];
+    if (studentEmails && studentEmails.length > 0) {
+      const studentsByEmail = await User.find({
+        email: { $in: studentEmails },
+        role: 'student',
+      });
+      studentIds_found.push(...studentsByEmail.map(s => s._id));
+    }
+    if (studentIds && studentIds.length > 0) {
+      const studentsById = await User.find({
+        studentId: { $in: studentIds },
+        role: 'student',
+      });
+      studentIds_found.push(...studentsById.map(s => s._id));
+    }
+    const existingStudentIds = classData.students.map(id => id.toString());
+    const newStudentIds = studentIds_found
+      .filter(id => !existingStudentIds.includes(id.toString()))
+      .map(id => id.toString());
+    classData.students = [...classData.students, ...newStudentIds];
+    await classData.save();
+    const populatedClass = await Class.findById(classData._id)
+      .populate('students', 'name email studentId profileImage phone location');
+    res.json({
+      success: true,
+      message: 'Students added successfully',
+      data: {
+        class: populatedClass,
+      },
+    });
+  } catch (error) {
+    console.error('Add students error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while adding students',
+      error: error.message,
+    });
+  }
+};
+export const removeStudentFromClass = async (req, res) => {
+  try {
+    const classData = await Class.findById(req.params.id);
+    if (!classData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found',
+      });
+    }
+    if (classData.teacher.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to modify this class',
+      });
+    }
+    classData.students = classData.students.filter(
+      studentId => studentId.toString() !== req.params.studentId
+    );
+    await classData.save();
+    const populatedClass = await Class.findById(classData._id)
+      .populate('students', 'name email studentId profileImage phone location');
+    res.json({
+      success: true,
+      message: 'Student removed successfully',
+      data: {
+        class: populatedClass,
+      },
+    });
+  } catch (error) {
+    console.error('Remove student error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while removing student',
+      error: error.message,
+    });
+  }
+};
+export const removeStudentsFromClass = async (req, res) => {
+  try {
+    const { studentEmails, studentIds } = req.body;
+    if ((!studentEmails || studentEmails.length === 0) && (!studentIds || studentIds.length === 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide at least one email or student ID',
+      });
+    }
+    const classData = await Class.findById(req.params.id);
+    if (!classData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found',
+      });
+    }
+    if (classData.teacher.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to modify this class',
+      });
+    }
+    const studentIdsToRemove = [];
+    const notFoundEmails = [];
+    const notFoundIds = [];
+    if (studentEmails && studentEmails.length > 0) {
+      const studentsByEmail = await User.find({
+        email: { $in: studentEmails },
+        role: 'student',
+      });
+      const foundEmails = studentsByEmail.map(s => s.email);
+      const notFound = studentEmails.filter(email => !foundEmails.includes(email));
+      notFoundEmails.push(...notFound);
+      studentIdsToRemove.push(...studentsByEmail.map(s => s._id.toString()));
+    }
+    if (studentIds && studentIds.length > 0) {
+      const studentsById = await User.find({
+        studentId: { $in: studentIds },
+        role: 'student',
+      });
+      const foundIds = studentsById.map(s => s.studentId);
+      const notFound = studentIds.filter(id => !foundIds.includes(id));
+      notFoundIds.push(...notFound);
+      studentIdsToRemove.push(...studentsById.map(s => s._id.toString()));
+    }
+    const existingStudentIds = classData.students.map(id => id.toString());
+    const studentsToRemove = studentIdsToRemove.filter(id => existingStudentIds.includes(id));
+    classData.students = classData.students.filter(
+      studentId => !studentsToRemove.includes(studentId.toString())
+    );
+    await classData.save();
+    const populatedClass = await Class.findById(classData._id)
+      .populate('students', 'name email studentId profileImage phone location');
+    let message = `Removed ${studentsToRemove.length} student(s) successfully`;
+    if (notFoundEmails.length > 0 || notFoundIds.length > 0) {
+      const notFoundList = [
+        ...(notFoundEmails.length > 0 ? [`Emails: ${notFoundEmails.join(', ')}`] : []),
+        ...(notFoundIds.length > 0 ? [`Student IDs: ${notFoundIds.join(', ')}`] : [])
+      ];
+      message += `. Not found: ${notFoundList.join('; ')}`;
+    }
+    res.json({
+      success: true,
+      message,
+      data: {
+        class: populatedClass,
+        removedCount: studentsToRemove.length,
+        notFoundEmails,
+        notFoundIds,
+      },
+    });
+  } catch (error) {
+    console.error('Remove students error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while removing students',
+      error: error.message,
+    });
+  }
+};
+export const getClassAnalysis = async (req, res) => {
+  try {
+    const classData = await Class.findById(req.params.id)
+      .populate('students', 'name email studentId');
+    if (!classData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found',
+      });
+    }
+    if (classData.teacher.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to access this class',
+      });
+    }
+    const studentIds = classData.students.map(s => s._id);
+    const quizResults = await QuizResult.find({
+      userId: { $in: studentIds },
+    })
+      .populate('quizId', 'name type')
+      .sort({ completedAt: -1 });
+    const totalQuizzes = await QuizResult.distinct('quizId', {
+      userId: { $in: studentIds },
+    });
+    const { classifyStudent } = await import('../utils/studentClassification.js');
+    const studentLatestResults = {};
+    const studentIdStrings = studentIds.map(id => id.toString());
+    studentIdStrings.forEach(userId => {
+      studentLatestResults[userId] = {
+        ocean: null,
+        logical: null,
+      };
+    });
+    quizResults.forEach(result => {
+      try {
+        if (!result || !result.userId) return;
+        const userId = result.userId.toString();
+        if (!studentLatestResults[userId]) {
+          return;
+        }
+        if (result.quizId && typeof result.quizId === 'object' && result.quizId.type === 'ocean' && 
+            result.scores && Object.keys(result.scores).length > 0) {
+          const resultDate = result.completedAt ? new Date(result.completedAt) : new Date(0);
+          const currentDate = studentLatestResults[userId].ocean?.completedAt 
+            ? new Date(studentLatestResults[userId].ocean.completedAt) 
+            : new Date(0);
+          if (!studentLatestResults[userId].ocean || resultDate > currentDate) {
+            studentLatestResults[userId].ocean = result;
+          }
+        }
+        if (result.quizId && typeof result.quizId === 'object' && result.quizId.type === 'logical' && 
+            result.correctCount !== undefined) {
+          const resultDate = result.completedAt ? new Date(result.completedAt) : new Date(0);
+          const currentDate = studentLatestResults[userId].logical?.completedAt 
+            ? new Date(studentLatestResults[userId].logical.completedAt) 
+            : new Date(0);
+          if (!studentLatestResults[userId].logical || resultDate > currentDate) {
+            studentLatestResults[userId].logical = result;
+          }
+        }
+      } catch (error) {
+        console.error('Error processing quiz result:', error, result);
+      }
+    });
+    const oceanAverages = {
+      neuroticism: 0,
+      extraversion: 0,
+      openness: 0,
+      agreeableness: 0,
+      conscientiousness: 0,
+    };
+    let studentsWithOcean = 0;
+    Object.values(studentLatestResults).forEach(({ ocean }) => {
+      if (ocean && ocean.scores) {
+        oceanAverages.neuroticism += ocean.scores.neuroticism || 0;
+        oceanAverages.extraversion += ocean.scores.extraversion || 0;
+        oceanAverages.openness += ocean.scores.openness || 0;
+        oceanAverages.agreeableness += ocean.scores.agreeableness || 0;
+        oceanAverages.conscientiousness += ocean.scores.conscientiousness || 0;
+        studentsWithOcean++;
+      }
+    });
+    if (studentsWithOcean > 0) {
+      Object.keys(oceanAverages).forEach(key => {
+        oceanAverages[key] = Math.round(oceanAverages[key] / studentsWithOcean);
+      });
+    }
+    let studentsWithLogical = 0;
+    let logicalSum = 0;
+    Object.values(studentLatestResults).forEach(({ logical }) => {
+      if (logical) {
+        const percentage = logical.percentage || 
+          (logical.correctCount !== undefined && logical.totalQuestions !== undefined
+            ? Math.round((logical.correctCount / logical.totalQuestions) * 100)
+            : 0);
+        if (percentage > 0) {
+          logicalSum += percentage;
+          studentsWithLogical++;
+        }
+      }
+    });
+    const logicalAverage = studentsWithLogical > 0 
+      ? Math.round((logicalSum / studentsWithLogical) * 100) / 100
+      : 0;
+    const classificationCounts = {
+      1: 0, 
       2: 0, 
       3: 0, 
       4: 0, 
       5: 0, 
-    };    const classificationNames = {      1: { vi: 'Tự Chủ', ja: '自主性' },      2: { vi: 'Dễ Áp Lực', ja: 'プレッシャー耐性' },      3: { vi: 'Sáng Tạo', ja: '創造性' },      4: { vi: 'Hướng Ngoại', ja: '外向性' },      5: { vi: 'Hướng Nội Phân Tích', ja: '内向的分析' },    };    Object.values(studentLatestResults).forEach(({ ocean, logical }, index) => {      try {        if (ocean && ocean.scores) {        const classification = classifyStudent(ocean.scores, logical);          if (classification && classification.id) {            const classificationId = classification.id;            if (classificationCounts.hasOwnProperty(classificationId)) {              classificationCounts[classificationId]++;            }          }        }      } catch (error) {        console.error(`  ❌ Error classifying student ${index + 1}:`, error);      }    });    const totalClassified = Object.values(classificationCounts).reduce((sum, count) => sum + count, 0);    const distribution = Object.keys(classificationCounts)      .map(id => parseInt(id))      .filter(id => classificationCounts[id] > 0)      .map(id => ({        type: classificationNames[id], 
-        count: classificationCounts[id],        percentage: totalClassified > 0 ? Math.round((classificationCounts[id] / totalClassified) * 100) : 0,      }));    res.json({      success: true,      data: {        class: {          id: classData._id,          name: classData.name,          institution: classData.institution,        },        statistics: {          totalStudents: studentIds.length,          totalQuizzes: totalQuizzes.length,          oceanAverages,          logicalAverage: Math.round(logicalAverage * 100) / 100,        },        distribution,        quizResults: quizResults.slice(0, 50), 
-      },    });  } catch (error) {    console.error('Get class analysis error:', error);    res.status(500).json({      success: false,      message: 'Server error while fetching class analysis',      error: error.message,    });  }};export const getStudentDetails = async (req, res) => {  try {    const classData = await Class.findById(req.params.classId);    if (!classData) {      return res.status(404).json({        success: false,        message: 'Class not found',      });    }    if (classData.teacher.toString() !== req.user._id.toString()) {      return res.status(403).json({        success: false,        message: 'Not authorized to access this class',      });    }    const studentInClass = classData.students.some(      studentId => studentId.toString() === req.params.studentId    );    if (!studentInClass) {      return res.status(404).json({        success: false,        message: 'Student not found in this class',      });    }    const student = await User.findById(req.params.studentId);    if (!student || student.role !== 'student') {      return res.status(404).json({        success: false,        message: 'Student not found',      });    }    const quizResults = await QuizResult.find({ userId: student._id })      .populate('quizId', 'name type')      .sort({ completedAt: -1 });    const oceanResults = quizResults.filter(r => {      return r.quizId && r.quizId.type === 'ocean' && r.scores &&              Object.keys(r.scores).length > 0 && r.dominantTrait;    });    const latestOceanResult = oceanResults.length > 0      ? oceanResults.sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt))[0]      : null;    const latestLogicalResult = quizResults      .filter(r => {        return r.quizId && r.quizId.type === 'logical' && r.correctCount !== undefined;      })      .sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt))[0] || null;    const uniqueQuizIds = [...new Set(quizResults.map(r => r.quizId?._id?.toString()).filter(Boolean))];    const totalQuizzes = await Quiz.countDocuments({ isActive: true });    const completedQuizzes = uniqueQuizIds.length;    const aiRecommendation = await AIRecommendation.findOne({      userId: student._id,      isActive: true,    })      .sort({ generatedAt: -1 })      .populate('oceanResultId')      .populate('logicalResultId');    const { classifyStudent } = await import('../utils/studentClassification.js');    const studentClassification = classifyStudent(      latestOceanResult?.scores,      latestLogicalResult    );    res.json({      success: true,      data: {        student: student.getPublicProfile(),        class: {          id: classData._id,          name: classData.name,          institution: classData.institution,        },        quizResults,        latestOceanResult,        latestLogicalResult: latestLogicalResult || null,        completedQuizzes,        totalQuizzes,        aiRecommendation: aiRecommendation || null,        studentClassification: studentClassification || null,      },    });  } catch (error) {    console.error('Get student details error:', error);    res.status(500).json({      success: false,      message: 'Server error while fetching student details',      error: error.message,    });  }};
+      6: 0,
+    };
+    const classificationNames = {
+      1: { vi: 'Tự Chủ', ja: '自主性' },
+      2: { vi: 'Dễ Áp Lực', ja: 'プレッシャー耐性' },
+      3: { vi: 'Sáng Tạo', ja: '創造性' },
+      4: { vi: 'Hướng Ngoại', ja: '外向性' },
+      5: { vi: 'Hướng Nội Phân Tích', ja: '内向的分析' },
+      6: { vi: 'Khác', ja: 'その他' },
+    };
+    Object.values(studentLatestResults).forEach(({ ocean, logical }, index) => {
+      try {
+        if (ocean && ocean.scores) {
+        const classification = classifyStudent(ocean.scores, logical);
+          if (classification && classification.id) {
+            const classificationId = classification.id;
+            if (classificationCounts.hasOwnProperty(classificationId)) {
+              classificationCounts[classificationId]++;
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`  ❌ Error classifying student ${index + 1}:`, error);
+      }
+    });
+    const totalClassified = Object.values(classificationCounts).reduce((sum, count) => sum + count, 0);
+    const distribution = Object.keys(classificationCounts)
+      .map(id => parseInt(id))
+      .filter(id => classificationCounts[id] > 0)
+      .map(id => ({
+        type: classificationNames[id], 
+        count: classificationCounts[id],
+        percentage: totalClassified > 0 ? Math.round((classificationCounts[id] / totalClassified) * 100) : 0,
+      }));
+    res.json({
+      success: true,
+      data: {
+        class: {
+          id: classData._id,
+          name: classData.name,
+          institution: classData.institution,
+        },
+        statistics: {
+          totalStudents: studentIds.length,
+          totalQuizzes: totalQuizzes.length,
+          oceanAverages,
+          logicalAverage: Math.round(logicalAverage * 100) / 100,
+        },
+        distribution,
+        quizResults: quizResults.slice(0, 50), 
+      },
+    });
+  } catch (error) {
+    console.error('Get class analysis error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching class analysis',
+      error: error.message,
+    });
+  }
+};
+export const getStudentDetails = async (req, res) => {
+  try {
+    const classData = await Class.findById(req.params.classId);
+    if (!classData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found',
+      });
+    }
+    if (classData.teacher.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to access this class',
+      });
+    }
+    const studentInClass = classData.students.some(
+      studentId => studentId.toString() === req.params.studentId
+    );
+    if (!studentInClass) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found in this class',
+      });
+    }
+    const student = await User.findById(req.params.studentId);
+    if (!student || student.role !== 'student') {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found',
+      });
+    }
+    const quizResults = await QuizResult.find({ userId: student._id })
+      .populate('quizId', 'name type')
+      .sort({ completedAt: -1 });
+    const oceanResults = quizResults.filter(r => {
+      return r.quizId && r.quizId.type === 'ocean' && r.scores && 
+             Object.keys(r.scores).length > 0 && r.dominantTrait;
+    });
+    const latestOceanResult = oceanResults.length > 0
+      ? oceanResults.sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt))[0]
+      : null;
+    const latestLogicalResult = quizResults
+      .filter(r => {
+        return r.quizId && r.quizId.type === 'logical' && r.correctCount !== undefined;
+      })
+      .sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt))[0] || null;
+    const uniqueQuizIds = [...new Set(quizResults.map(r => r.quizId?._id?.toString()).filter(Boolean))];
+    const totalQuizzes = await Quiz.countDocuments({ isActive: true });
+    const completedQuizzes = uniqueQuizIds.length;
+    const aiRecommendation = await AIRecommendation.findOne({
+      userId: student._id,
+      isActive: true,
+    })
+      .sort({ generatedAt: -1 })
+      .populate('oceanResultId')
+      .populate('logicalResultId');
+    const { classifyStudent } = await import('../utils/studentClassification.js');
+    const studentClassification = classifyStudent(
+      latestOceanResult?.scores,
+      latestLogicalResult
+    );
+    res.json({
+      success: true,
+      data: {
+        student: student.getPublicProfile(),
+        class: {
+          id: classData._id,
+          name: classData.name,
+          institution: classData.institution,
+        },
+        quizResults,
+        latestOceanResult,
+        latestLogicalResult: latestLogicalResult || null,
+        completedQuizzes,
+        totalQuizzes,
+        aiRecommendation: aiRecommendation || null,
+        studentClassification: studentClassification || null,
+      },
+    });
+  } catch (error) {
+    console.error('Get student details error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching student details',
+      error: error.message,
+    });
+  }
+};
