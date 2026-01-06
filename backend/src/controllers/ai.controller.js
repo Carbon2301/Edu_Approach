@@ -1,1 +1,158 @@
-import QuizResult from '../models/QuizResult.model.js';import AIRecommendation from '../models/AIRecommendation.model.js';import aiService from '../services/ai.service.gemini.js';export const generateRecommendations = async (req, res) => {  try {    const userId = req.user.id;    const oceanResults = await QuizResult.find({ userId })      .populate({        path: 'quizId',        match: { type: 'ocean' },      })      .sort({ completedAt: -1 });    const logicalResults = await QuizResult.find({ userId })      .populate({        path: 'quizId',        match: { type: 'logical' },      })      .sort({ completedAt: -1 });    const validOceanResult = oceanResults.find(r => r.quizId && r.quizId.type === 'ocean') || null;    const validLogicalResult = logicalResults.find(r => r.quizId && r.quizId.type === 'logical') || null;    if (!validOceanResult && !validLogicalResult) {      return res.status(400).json({        success: false,        message: 'No quiz results found. Please complete at least one quiz first.',      });    }    let mode = 'combined';    if (validOceanResult && !validLogicalResult) {      mode = 'ocean_only';    } else if (!validOceanResult && validLogicalResult) {      mode = 'logical_only';    }    const jaRecommendations = await aiService.generateRecommendations({      name: req.user.name,      oceanResult: validOceanResult,      logicalResult: validLogicalResult,      language: 'ja',      mode: mode,    });    const viRecommendations = await aiService.generateRecommendations({      name: req.user.name,      oceanResult: validOceanResult,      logicalResult: validLogicalResult,      language: 'vi',      mode: mode,    });    const jaRecs = jaRecommendations.recommendations || [];    const viRecs = viRecommendations.recommendations || [];    const minCount = Math.min(jaRecs.length, viRecs.length, 8);    const maxCount = Math.max(jaRecs.length, viRecs.length, 10);    const finalJaRecs = jaRecs.length >= 8 ? jaRecs.slice(0, 10) : jaRecs;    const finalViRecs = viRecs.length >= 8 ? viRecs.slice(0, 10) : viRecs;    await AIRecommendation.updateMany(      { userId, isActive: true },      { isActive: false }    );    const recommendation = await AIRecommendation.create({      userId,      oceanResultId: validOceanResult?._id,      logicalResultId: validLogicalResult?._id,      recommendations: {        ja: finalJaRecs,        vi: finalViRecs,      },      rawResponse: {        ja: jaRecommendations.rawResponse,        vi: viRecommendations.rawResponse,      },      personalityType: validOceanResult?.dominantTrait,      dominantTrait: validOceanResult?.dominantTrait,      isActive: true,    });    res.json({      success: true,      message: 'AI recommendations generated successfully',      data: { recommendation },    });  } catch (error) {    console.error('Generate recommendations error:', error);    res.status(500).json({      success: false,      message: 'Failed to generate recommendations',      error: error.message,    });  }};export const getRecommendations = async (req, res) => {  try {    const recommendation = await AIRecommendation.findOne({      userId: req.user.id,      isActive: true,    })      .sort({ generatedAt: -1 })      .populate('oceanResultId')      .populate('logicalResultId');    if (!recommendation) {      return res.status(404).json({        success: false,        message: 'No recommendations found',      });    }    res.json({      success: true,      data: { recommendation },    });  } catch (error) {    console.error('Get recommendations error:', error);    res.status(500).json({      success: false,      message: 'Server error',      error: error.message,    });  }};export const checkRecommendationStatus = async (req, res) => {  try {    const latestRecommendation = await AIRecommendation.findOne({      userId: req.user.id,      isActive: true,    }).sort({ generatedAt: -1 });    const oceanResults = await QuizResult.find({      userId: req.user.id,    })      .populate({ path: 'quizId', match: { type: 'ocean' } })      .sort({ completedAt: -1 });    const logicalResults = await QuizResult.find({      userId: req.user.id,    })      .populate({ path: 'quizId', match: { type: 'logical' } })      .sort({ completedAt: -1 });    const validOcean = oceanResults.find(r => r.quizId && r.quizId.type === 'ocean') || null;    const validLogical = logicalResults.find(r => r.quizId && r.quizId.type === 'logical') || null;    const hasNewResults =       (validOcean && (!latestRecommendation ||         !latestRecommendation.oceanResultId ||        validOcean.completedAt > latestRecommendation.generatedAt)) ||      (validLogical && (!latestRecommendation ||         !latestRecommendation.logicalResultId ||        validLogical.completedAt > latestRecommendation.generatedAt));    res.json({      success: true,      data: {        hasRecommendations: !!latestRecommendation,        needsUpdate: hasNewResults,        hasOceanResult: !!validOcean,        hasLogicalResult: !!validLogical,      },    });  } catch (error) {    console.error('Check status error:', error);    res.status(500).json({      success: false,      message: 'Server error',      error: error.message,    });  }};
+import QuizResult from '../models/QuizResult.model.js';
+import AIRecommendation from '../models/AIRecommendation.model.js';
+import aiService from '../services/ai.service.gemini.js';
+export const generateRecommendations = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const oceanResults = await QuizResult.find({ userId })
+      .populate({
+        path: 'quizId',
+        match: { type: 'ocean' },
+      })
+      .sort({ completedAt: -1 });
+    const logicalResults = await QuizResult.find({ userId })
+      .populate({
+        path: 'quizId',
+        match: { type: 'logical' },
+      })
+      .sort({ completedAt: -1 });
+    const validOceanResult = oceanResults.find(r => r.quizId && r.quizId.type === 'ocean') || null;
+    const validLogicalResult = logicalResults.find(r => r.quizId && r.quizId.type === 'logical') || null;
+    if (!validOceanResult && !validLogicalResult) {
+      return res.status(400).json({
+        success: false,
+        message: 'No quiz results found. Please complete at least one quiz first.',
+      });
+    }
+    let mode = 'combined';
+    if (validOceanResult && !validLogicalResult) {
+      mode = 'ocean_only';
+    } else if (!validOceanResult && validLogicalResult) {
+      mode = 'logical_only';
+    }
+    const jaRecommendations = await aiService.generateRecommendations({
+      name: req.user.name,
+      oceanResult: validOceanResult,
+      logicalResult: validLogicalResult,
+      language: 'ja',
+      mode: mode,
+    });
+    const viRecommendations = await aiService.generateRecommendations({
+      name: req.user.name,
+      oceanResult: validOceanResult,
+      logicalResult: validLogicalResult,
+      language: 'vi',
+      mode: mode,
+    });
+    const jaRecs = jaRecommendations.recommendations || [];
+    const viRecs = viRecommendations.recommendations || [];
+    
+    const finalJaRecs = jaRecs.slice(0, 3);
+    const finalViRecs = viRecs.slice(0, 3);
+    
+    console.log(`Saving recommendations - JA: ${finalJaRecs.length}, VI: ${finalViRecs.length}`);
+    await AIRecommendation.updateMany(
+      { userId, isActive: true },
+      { isActive: false }
+    );
+    const recommendation = await AIRecommendation.create({
+      userId,
+      oceanResultId: validOceanResult?._id,
+      logicalResultId: validLogicalResult?._id,
+      recommendations: {
+        ja: finalJaRecs,
+        vi: finalViRecs,
+      },
+      rawResponse: {
+        ja: jaRecommendations.rawResponse,
+        vi: viRecommendations.rawResponse,
+      },
+      personalityType: validOceanResult?.dominantTrait,
+      dominantTrait: validOceanResult?.dominantTrait,
+      isActive: true,
+    });
+    res.json({
+      success: true,
+      message: 'AI recommendations generated successfully',
+      data: { recommendation },
+    });
+  } catch (error) {
+    console.error('Generate recommendations error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate recommendations',
+      error: error.message,
+    });
+  }
+};
+export const getRecommendations = async (req, res) => {
+  try {
+    const recommendation = await AIRecommendation.findOne({
+      userId: req.user.id,
+      isActive: true,
+    })
+      .sort({ generatedAt: -1 })
+      .populate('oceanResultId')
+      .populate('logicalResultId');
+    if (!recommendation) {
+      return res.status(404).json({
+        success: false,
+        message: 'No recommendations found',
+      });
+    }
+    res.json({
+      success: true,
+      data: { recommendation },
+    });
+  } catch (error) {
+    console.error('Get recommendations error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message,
+    });
+  }
+};
+export const checkRecommendationStatus = async (req, res) => {
+  try {
+    const latestRecommendation = await AIRecommendation.findOne({
+      userId: req.user.id,
+      isActive: true,
+    }).sort({ generatedAt: -1 });
+    const oceanResults = await QuizResult.find({
+      userId: req.user.id,
+    })
+      .populate({ path: 'quizId', match: { type: 'ocean' } })
+      .sort({ completedAt: -1 });
+    const logicalResults = await QuizResult.find({
+      userId: req.user.id,
+    })
+      .populate({ path: 'quizId', match: { type: 'logical' } })
+      .sort({ completedAt: -1 });
+    const validOcean = oceanResults.find(r => r.quizId && r.quizId.type === 'ocean') || null;
+    const validLogical = logicalResults.find(r => r.quizId && r.quizId.type === 'logical') || null;
+    const hasNewResults = 
+      (validOcean && (!latestRecommendation || 
+        !latestRecommendation.oceanResultId ||
+        validOcean.completedAt > latestRecommendation.generatedAt)) ||
+      (validLogical && (!latestRecommendation || 
+        !latestRecommendation.logicalResultId ||
+        validLogical.completedAt > latestRecommendation.generatedAt));
+    res.json({
+      success: true,
+      data: {
+        hasRecommendations: !!latestRecommendation,
+        needsUpdate: hasNewResults,
+        hasOceanResult: !!validOcean,
+        hasLogicalResult: !!validLogical,
+      },
+    });
+  } catch (error) {
+    console.error('Check status error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message,
+    });
+  }
+};
